@@ -2,9 +2,14 @@
 
 ## Overview
 
-A two-phase AI consultation system using a multi-agent architecture:
-- **Phase 1**: Doctor gathers info → Supervisor acts as traffic light (approve/reject)
-- **Phase 2**: Counselor explains assessment and plan
+Amigo is a two-phase AI primary care chat that routes each patient message through
+specialized agents and a simple state machine. In Phase 1, a Doctor agent gathers
+symptoms and decides whether to keep probing, escalate for emergency care, or
+transition to assessment. Probe responses are quality-gated by a Supervisor with
+up to three retries (feedback is fed back into the Doctor). In Phase 2, a Counselor
+explains the assessment and plan in a structured format, or answers follow-up
+questions directly. The API keeps chat state (phase, collected info, assessment,
+plan) and signals emergencies and phase transitions to the UI.
 
 ---
 
@@ -19,7 +24,7 @@ A two-phase AI consultation system using a multi-agent architecture:
 │      ▼                                                                      │
 │   ┌──────────────┐         ┌─────────────────┐                              │
 │   │    Doctor    │────────▶│   Supervisor    │                              │
-│   │    Agent     │         │  (traffic light)│                              │
+│   │    Agent     │  (probe)│  (traffic light)│                              │
 │   └──────────────┘         └────────┬────────┘                              │
 │         ▲                           │                                       │
 │         │                     ┌─────┴─────┐                                 │
@@ -65,8 +70,12 @@ A two-phase AI consultation system using a multi-agent architecture:
 ## Supervisor as Traffic Light
 
 The Supervisor does NOT generate content. It only gives:
-- **🟢 Green** (`approved: true`) → Doctor's response goes to patient
-- **🔴 Red** (`approved: false`) → Doctor regenerates response
+- **🟢 Green** (`approved: true`) → Doctor's probe response goes to patient
+- **🔴 Red** (`approved: false`) → Doctor regenerates response using feedback
+
+Notes:
+- Supervisor validation is only applied to `probe` responses.
+- `ready` and `emergency` responses bypass validation and proceed immediately.
 
 ```
 Doctor generates response
@@ -80,7 +89,7 @@ Doctor generates response
     ▼         ▼
   [🟢]      [🔴]
    │         │
-   │         └──▶ Doctor tries again (up to 3x)
+   │         └──▶ Doctor tries again (up to 3x, with feedback)
    │                    │
    │                    └──▶ After 3 failures: escalate()
    ▼
@@ -94,27 +103,37 @@ Send to patient
 ```typescript
 let approved = false;
 let attempts = 0;
+let supervisorFeedback;
 
 while (!approved && attempts < 3) {
   attempts++;
-  
-  // Doctor generates response
-  doctorDecision = await runDoctor(conversation, collectedInfo);
-  
-  // Supervisor checks it (traffic light)
-  supervisorResult = await runSupervisor(doctorDecision.response, doctorDecision.type);
-  
-  approved = supervisorResult.approved;  // 🟢 or 🔴
-  
+
+  // Doctor generates response (with optional feedback)
+  doctorDecision = await runDoctor(conversation, collectedInfo, supervisorFeedback);
+
+  // Ready or emergency skip validation
+  if (doctorDecision.type === "ready" || doctorDecision.type === "emergency") {
+    approved = true;
+    break;
+  }
+
+  // Supervisor checks probe responses only
+  supervisorResult = await runSupervisor(
+    doctorDecision.response,
+    doctorDecision.type,
+    conversation,
+    doctorDecision.assessment,
+    doctorDecision.plan
+  );
+
+  approved = supervisorResult.approved;
   if (!approved) {
-    console.log(`🔴 Rejected (attempt ${attempts}): ${supervisorResult.reason}`);
-    // Loop continues, Doctor will try again
+    supervisorFeedback = supervisorResult.reason || "Fix supervisor constraints";
   }
 }
 
 if (!approved) {
-  // 3 strikes, escalate to human
-  await escalate("Supervisor rejected 3 times");
+  await escalate("Supervisor validation failed after 3 attempts");
 }
 ```
 
@@ -125,8 +144,8 @@ if (!approved) {
 | Agent | What it does | Output |
 |-------|--------------|--------|
 | **Doctor** | Talks to patient, gathers symptoms, decides next step | `{type, response, assessment?, plan?}` |
-| **Supervisor** | Reviews Doctor's response, approve or reject | `{approved: true/false, reason?}` |
-| **Counselor** | Explains assessment to patient in Phase 2 | Plain text response |
+| **Supervisor** | Reviews Doctor's probe response, approve or reject | `{approved: true/false, reason?}` |
+| **Counselor** | Explains assessment/plan or answers follow-ups | `{mode: "plan"|"answer", assessment?, treatment_plan?, follow_up?, answer?}` |
 
 ---
 
@@ -140,13 +159,39 @@ if (!approved) {
 
 ---
 
+## Counselor Modes (Phase 2)
+
+- **plan mode**: Structured assessment + treatment plan (3 items) + follow-up.
+- **answer mode**: Direct answer when the user asks a specific question.
+- The API formats plan mode into `ASSESSMENT / TREATMENT_PLAN / FOLLOW_UP`
+  sections and normalizes the closing line.
+
+---
+
+## Chat State & API Response
+
+State fields tracked by the API:
+- `phase`: `"collecting" | "counseling" | "escalated" | "completed"` (completed is currently unused)
+- `collectedInfo`: user messages collected in Phase 1
+- `assessment`, `plan`: saved when the Doctor returns `ready`
+
+API response fields used by the UI:
+- `response`: assistant message to display
+- `newState`: updated `ChatState`
+- `isEmergency`: highlights emergency/escalation messages
+- `showPhaseTransition`: triggers the Phase 1 → Phase 2 transition banner
+- `counselor`: raw `CounselorResult` for structured rendering
+
+---
+
 ## File Structure
 
 ```
 src/
 ├── lib/
-│   ├── types.ts          # Phase, ChatState, DoctorDecision, SupervisorResult
-│   └── agents.ts         # runDoctor(), runSupervisor(), runCounselor(), escalate()
+│   ├── types.ts               # Phase, ChatState, DoctorDecision, SupervisorResult
+│   ├── agents.ts              # runDoctor(), runSupervisor(), runCounselor(), escalate()
+│   └── counselorFormatting.ts # normalizeTreatmentPlan()
 ├── components/
 │   ├── PhaseIndicator.tsx    # Shows Phase 1 vs Phase 2 visually
 │   ├── ChatMessage.tsx       # Shows "Dr. Amigo" or "Counselor" label
@@ -158,30 +203,12 @@ src/
 
 ---
 
-## Visual Phase Indicator (UI)
-
-```
-Phase 1 active:
-┌────────────────────────────────────────────────────┐
-│  [📋 Information Gathering]────[💊 Assessment]     │
-│    ▲▲▲ highlighted                                 │
-└────────────────────────────────────────────────────┘
-
-Phase 2 active:
-┌────────────────────────────────────────────────────┐
-│  [✓ Information Gathering]────[💊 Assessment]      │
-│                                  ▲▲▲ highlighted   │
-└────────────────────────────────────────────────────┘
-```
-
----
-
 ## Escalation Triggers
 
 | Trigger | When |
 |---------|------|
 | Emergency symptoms | Doctor returns `type: "emergency"` |
-| 3 supervisor rejections | Quality gate failed |
+| 3 supervisor rejections | Probe responses fail validation 3x |
 | System error | Catch block in API |
 
 **Stub (replace in production):**
