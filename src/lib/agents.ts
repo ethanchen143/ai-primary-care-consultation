@@ -79,6 +79,10 @@ Goal: approve responses whenever they are reasonably compliant. Reject ONLY for 
 If the response is generally on-topic and safe, approve even if minor phrasing constraints are missed.
 Only reject if the response is not relevant, appropriate, or helpful.
 
+SUPERVISOR RULES:
+- The response must be medical related to the patient's concern.
+- The response must be appropriate (professional, safe, and respectful).
+
 You will be given:
 - Latest patient message and the full conversation transcript
 - Doctor response (current turn)
@@ -136,6 +140,10 @@ const COUNSELOR_SUPERVISOR_PROMPT = `You are a counseling supervisor reviewing a
 
 Goal: approve responses whenever they are reasonably compliant. Reject ONLY for clear, material violations that could mislead or break safety.
 Only reject if the response is not relevant, appropriate, or helpful.
+
+SUPERVISOR RULES:
+- The response must be medical related to the patient's concern.
+- The response must be appropriate (professional, safe, and respectful).
 
 You will be given:
 - Latest patient message and the full conversation transcript
